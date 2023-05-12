@@ -817,7 +817,7 @@ static std::array<
 // that require the corresponding backend.
 std::array<
     c10::optional<std::pair<BackendMetaPtr, BackendMetaPtr>>,
-    at::COMPILE_TIME_MAX_DEVICE_TYPES> 
+    at::COMPILE_TIME_MAX_DEVICE_TYPES>
 GetBackendMetaSerialization() {
   return BackendMetaSerialization;
 }
