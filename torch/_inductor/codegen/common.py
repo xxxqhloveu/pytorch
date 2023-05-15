@@ -44,7 +44,7 @@ def index_prevent_reordering(index: typing.List[sympy.Expr], index_vars, sizes):
     return [*index, sympy_dot(index_vars, FlexibleLayout.contiguous_strides(sizes))]
 
 
-def _data_type_propagation(sub_graph: torch.fx.Graph):
+def _data_type_propagation(sub_graph: torch.fx.Graph, masked_subblock_dtypes: dict):
     def propagate_node(node: torch.fx.Node):
         _node: torch.fx.Node = node
         ops_to_bool = [
@@ -85,6 +85,10 @@ def _data_type_propagation(sub_graph: torch.fx.Graph):
                 opt_ctx.dtype = reduction_to_dtype[reduction_type]
         elif _node.target == "load":
             opt_ctx.dtype = V.graph.get_dtype(_node.args[1])
+        elif "masked_subblock" in _node.target:
+            assert len(masked_subblock_dtypes) != 0
+            assert _node.target in masked_subblock_dtypes
+            opt_ctx.dtype = masked_subblock_dtypes[_node.target]
         if opt_ctx.dtype is not None:
             data_type_logger(
                 f"for node.target = {_node.target}, dtype is propagated to {opt_ctx.dtype}"
@@ -131,7 +135,7 @@ def _data_type_propagation(sub_graph: torch.fx.Graph):
         new_node_propogated = propagate_node(node) or new_node_propogated
 
     if new_node_propogated:
-        _data_type_propagation(sub_graph)
+        _data_type_propagation(sub_graph, masked_subblock_dtypes)
 
 
 def data_type_propagation(node):
@@ -140,12 +144,33 @@ def data_type_propagation(node):
 
     assert isinstance(node, SchedulerNode)
     _node: SchedulerNode = node
+
+    def get_masked_subblock_data_type(graph: torch.fx.Graph):
+        output_dtype = None
+
+        for node in graph.nodes:
+            if node.target == "output":
+                assert output_dtype is None
+                opt_ctx = node.meta[OptimizationContext.key]
+                assert opt_ctx
+                assert opt_ctx.dtype
+                output_dtype = opt_ctx.dtype
+
+        return output_dtype
+
     if isinstance(_node._body, LoopBody):
         body: LoopBody = node._body
-        sub_blocks = [body.root_block] + list(body.subblocks.values())
-        for sub_block in sub_blocks:
+        root_block = body.root_block
+        sub_blocks = body.subblocks
+        masked_subblock_dtypes = {}
+        for sub_block_name, sub_block in sub_blocks.items():
+            assert "masked_subblock" in sub_block_name
             _sub_graph: torch.fx.Graph = sub_block.graph
-            _data_type_propagation(_sub_graph)
+            _data_type_propagation(_sub_graph, masked_subblock_dtypes)
+            masked_subblock_dtype = get_masked_subblock_data_type(_sub_graph)
+            masked_subblock_dtypes[sub_block_name] = masked_subblock_dtype
+
+        _data_type_propagation(root_block.graph, masked_subblock_dtypes)
 
 
 class ExprPrinter(Printer):
@@ -811,13 +836,6 @@ class OptimizationContext:
 
     # Load value as mask
     is_load_as_mask: bool = False
-    # Load bfloat16 value as float32
-    is_load_bf16_as_fp32: bool = False
-    # Store float32 value as bfloat16
-    is_store_fp32_as_bf16: bool = False
-    # do not  need type cast for
-    # for mem copy only node bf16 load -> bf16 store,
-    is_bf16_mem_copy: bool = False
 
     dtype: torch.dtype = None
     ops_name: str = ""
