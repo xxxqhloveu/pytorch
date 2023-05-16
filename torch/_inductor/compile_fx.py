@@ -667,6 +667,10 @@ def compile_fx(
 
     graph_id = next(_graph_counter)
 
+    decompositions = (
+        decompositions if decompositions is not None else select_decomp_table()
+    )
+
     @dynamo_utils.dynamo_timed
     def fw_compiler_base(model: torch.fx.GraphModule, example_inputs, is_inference):
         if is_inference:
@@ -686,8 +690,12 @@ def compile_fx(
 
     fw_compiler = functools.partial(fw_compiler_base, is_inference=False)
 
-    if config.freezing:
+    # TODO - expand grad required checks
+    if config.freezing and not torch.is_grad_enabled():
         from torch._inductor.freezing import freeze
+
+        decompositions = dict(decompositions)
+        del decompositions[torch.ops.aten._native_batch_norm_legit_no_training.default]
 
         def inference_compiler(model: torch.fx.GraphModule, example_inputs):
             # partition_fn won't be called
@@ -718,7 +726,7 @@ def compile_fx(
                 )
 
             # Need to drop the args we have constant-ified.
-            # TODO - find way for aot_autograd to not update calling convention 
+            # TODO - find way for aot_autograd to not update calling convention
             def wrapper(args):
                 args_new = [args[ind] for ind in preserved_arg_indices]
                 args.clear()
@@ -756,8 +764,6 @@ def compile_fx(
             )
 
     with overrides.patch_functions():
-        if decompositions is None:
-            decompositions = select_decomp_table()
         # TODO: can add logging before/after the call to create_aot_dispatcher_function
         # in torch._functorch/aot_autograd.py::aot_module_simplified::aot_function_simplified::new_func
         # once torchdynamo is merged into pytorch

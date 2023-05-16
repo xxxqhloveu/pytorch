@@ -1,10 +1,19 @@
 import itertools
+
+import unittest
 import weakref
 from typing import List, Optional, Tuple
 
 import torch
+import torch.fx.traceback as fx_traceback
 import torch.utils._pytree as pytree
+from torch._dynamo.utils import detect_fake_mode
+from torch.ao.quantization._pt2e.utils import _fuse_conv_bn_
+from torch.fx.experimental.proxy_tensor import make_fx
 from . import config
+from .decomposition import select_decomp_table
+
+aten = torch.ops.aten
 
 
 def replace_node_with_constant(gm, node, constant):
@@ -99,6 +108,32 @@ def constant_fold(gm):
     gm.recompile()
 
 
+@torch.utils._python_dispatch._disable_current_modes()
+def fuse_conv_bn(gm):
+    _fuse_conv_bn_(gm)
+
+
+def decompose_unfused_batchnorms(gm, example_inputs, preserved_arg_indices):
+    if not any(
+        node.target is aten._native_batch_norm_legit_no_training.default
+        for node in gm.graph.nodes
+    ):
+        return gm
+
+    fake_mode = detect_fake_mode(example_inputs)
+
+    # constant params will be real tensors, not fake
+    # TODO: fake_mode should should enable py dispatcher if its symbolic ?
+    with unittest.mock.patch.object(
+        fake_mode, "allow_non_fake_inputs", True
+    ), fake_mode:
+        args = [e for i, e in enumerate(example_inputs) if i in preserved_arg_indices]
+        with fx_traceback.preserve_node_meta():
+            gm = make_fx(gm, select_decomp_table())(*args)
+
+    return gm
+
+
 def freeze(
     original_gm: torch.fx.GraphModule,
     gm: torch.fx.GraphModule,
@@ -106,7 +141,7 @@ def freeze(
     fw_metadata,
 ) -> Tuple[torch.fx.GraphModule, List[int]]:
     "Inlines unmutated parameters into constants and runs constant propagation and other optimizations"
-    
+
     params = {
         **dict(original_gm.named_parameters(remove_duplicate=False)),
         **dict(original_gm.named_buffers(remove_duplicate=False)),
@@ -115,17 +150,21 @@ def freeze(
     params_flat = tuple(params_flat)
 
     # TODO - aot_autograd currently doesn't have a way of not updating the calling convention to include
-    # parameters, so we need to drop parameters that became constants from inputs. This also prevents 
+    # parameters, so we need to drop parameters that became constants from inputs. This also prevents
     # deallocating unused parameters if `freezing_discard_parameters` is True.
     gm, preserved_arg_indices = replace_params_with_constants(
         gm, params_flat, example_inputs_, fw_metadata
     )
 
     constant_fold(gm)
+    fuse_conv_bn(gm)
+    # now, decomp batch norm if we were unable to fuse it
+    gm = decompose_unfused_batchnorms(gm, example_inputs_, preserved_arg_indices)
 
     # invalidate nn Modules
     if config.freezing_discard_parameters:
         invalidate_eager_modules()
+
     return gm, preserved_arg_indices
 
 
