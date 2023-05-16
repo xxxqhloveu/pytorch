@@ -108,6 +108,7 @@ def validate_ir(node_or_nodes):
             assert isinstance(
                 nodes,
                 (
+                    torch._inductor.ir.ExpandView,
                     DynamicScalar,
                     TensorBox,
                     RandSeedBuffer,
