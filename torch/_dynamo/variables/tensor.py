@@ -4,6 +4,8 @@ import operator
 import types
 from typing import Dict, List
 
+import sympy
+
 import torch.fx
 import torch.random
 from torch.fx.experimental.symbolic_shapes import guard_scalar, SymTypes
@@ -182,11 +184,17 @@ class TensorVariable(VariableTracker):
         if result is not None and self.source is not None:
             result = result.add_guard(self.make_guard(GuardBuilder.TYPE_MATCH))
 
-        # It's hard to get resize_() on graph input work properly across
+        # It's hard to get inplace view (metadata mutation) on graph input work properly across
         # dynamo/aot/inductor, just fall back.
-        if name in ("resize_", "unsqueeze_") and self.source is not None:
-            # Delay the graph break to the actual call of unsqueeze_/resize_
-            return variables.misc.DelayGraphBreakVariable()
+        if self.source is not None and hasattr(torch.ops.aten, name):
+            fn = getattr(torch.ops.aten, name)
+            if (
+                hasattr(fn, "overloads")
+                and hasattr(fn, fn.overloads()[0])
+                and torch.Tag.inplace_view in getattr(fn, fn.overloads()[0]).tags
+            ):
+                # Delay the graph break to the actual call of unsqueeze_/resize_/resize_as_ etc.
+                return variables.misc.DelayGraphBreakVariable()
 
         # For attributes (not methods) that were not caught in the special handling above,
         # (e.g. tensor.real), we handle these generically, assuming that the output type is
@@ -238,8 +246,13 @@ class TensorVariable(VariableTracker):
                 length = self.size[0]
             else:
                 dyn_length = self.call_method(tx, "size", [ConstantVariable(0)], {})
-                assert isinstance(dyn_length, SymNodeVariable)
-                length = dyn_length.evaluate_expr(tx.output)
+                # SymNodeVariable for symbolic sizes, ConstantVariable for constants OR values prouced through
+                # symbolic_shapes, but that end up as int/sympy.Integer
+                assert isinstance(dyn_length, (SymNodeVariable, ConstantVariable))
+                if isinstance(dyn_length, SymNodeVariable):
+                    length = dyn_length.evaluate_expr(tx.output)
+                else:
+                    length = dyn_length.value
             idxes = range(length)
         return [wrap_fx_proxy(tx, self.as_proxy()[i], **options) for i in idxes]
 
@@ -495,6 +508,10 @@ class SymNodeVariable(VariableTracker):
         if sym_num is None:
             sym_num = get_fake_value(proxy.node, tx)
         proxy.node.meta["example_value"] = sym_num
+
+        if isinstance(sym_num, (sympy.Integer, int)):
+            return ConstantVariable(int(sym_num))
+
         return SymNodeVariable(proxy, sym_num, **options)
 
     def __init__(self, proxy, sym_num, **kwargs):
