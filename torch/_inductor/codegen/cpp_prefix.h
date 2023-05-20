@@ -96,6 +96,22 @@ template <typename T> void atomic_add(volatile T *addr, T offset) {
                                                std::memory_order_relaxed));
 }
 
+template <typename T> void atomic_fetch_add(volatile T *addr, T offset) {
+  static_assert(sizeof(std::atomic<T>) == sizeof(T),
+                "std::atomic issue");
+  std::atomic<T> *atomic_addr = (std::atomic<T> *)addr;
+  atomic_addr->fetch_add(offset, std::memory_order_relaxed);
+}
+
+// Since C++20 float is supported by fetch_add, but the performance may not
+// better than compare_exchange_weak, which can be checked by microbenchmark
+// inductor_cpu_atomic.py
+template <> inline void atomic_add<unsigned char>(volatile unsigned char *addr, unsigned char offset) { atomic_fetch_add(addr, offset); }
+template <> inline void atomic_add<signed char>(volatile signed char *addr, signed char offset) { atomic_fetch_add(addr, offset); }
+template <> inline void atomic_add<short>(volatile short *addr, short offset) { atomic_fetch_add(addr, offset); }
+template <> inline void atomic_add<int>(volatile int *addr, int offset) { atomic_fetch_add(addr, offset); }
+template <> inline void atomic_add<long>(volatile long *addr, long offset) { atomic_fetch_add(addr, offset); }
+
 // This function is used to convert bool or uint8 to float mask for
 // vectorization. The caller needs to make sure the src represents TRUE/FALSE
 // correctly.
