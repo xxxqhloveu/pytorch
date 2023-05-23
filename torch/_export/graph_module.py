@@ -5,7 +5,7 @@ import warnings
 import sympy
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 from sympy.logic.boolalg import Boolean as SympyBoolean
 
@@ -15,6 +15,7 @@ import torch.fx._pytree as fx_pytree
 import torch.utils._pytree as pytree
 
 from . import error
+from torch._functorch.aot_autograd import FQN, GraphInputName, GraphOutputName
 
 ExportGraphModule = fx.GraphModule
 
@@ -45,12 +46,22 @@ class ExportMetadata:
     out_spec: Optional[pytree.TreeSpec] = None
     update_spec: int = 0  # TODO more information here.
     # TODO(gmagogsfm): Expose constraints in Metadata
-    # Mapping from output name to mutated buffer names.
-    mutation: List[Tuple[str, List[str]]] = dataclasses.field(default_factory=list)
     input_shape_constraints: Dict[str, Any] = dataclasses.field(default_factory=dict)
     inline_constraints: Dict[str, Any] = dataclasses.field(default_factory=dict)
     input_name_to_example_inputs: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    mutation_data: "MutationData" = None
 
+@dataclasses.dataclass
+class MutationData:
+    parameters: List[FQN]
+    buffers: List[FQN]
+
+    user_inputs: List[GraphInputName]
+    user_outputs: List[GraphOutputName]
+    inputs_to_parameters: Dict[GraphInputName, FQN]
+    inputs_to_buffers: Dict[GraphInputName, FQN]
+
+    buffers_to_mutate: Dict[GraphOutputName, FQN]
 
 EXPORT_METADATA = "_export_metadata_key"
 
@@ -142,21 +153,31 @@ class ExportGraphModuleMixin:
             except Exception as e:
                 raise error.InternalError("The in_spec is not correctly maintained.") from e
 
+        parameters = getattr(self, "parameters", OrderedDict())
+        buffers = getattr(self, "buffers", OrderedDict())
+
+        params_buffer = {
+            **dict(parameters),
+            **dict(buffers),
+        }
+
+        param_buffer_flat, params_spec = pytree.tree_flatten(params_buffer)
+
         with torch.fx.traceback.preserve_node_meta(), torch.no_grad():
-            res = torch.fx.Interpreter(self).run(*args, enable_io_processing=False)
+            res = torch.fx.Interpreter(self).run(*param_buffer_flat, *args, enable_io_processing=False)
+
+        mutation = meta.mutation_data
+        num_mutated = len(mutation.buffers_to_mutate) if mutation is not None else 0
+        user_flat_outputs = res[num_mutated:]
+
+        # TODO update the mutated buffers in memory
 
         if getattr(meta, "out_spec", None) is not None:
             try:
-                mutation = meta.mutation
-                num_mutated = len(mutation) if mutation is not None else 0
-                res = pytree.tree_unflatten(
-                    res[num_mutated:],
-                    meta.out_spec,
-                )
-                return res
+                return pytree.tree_unflatten(user_flat_outputs, meta.out_spec)
             except Exception as e:
                 raise error.InternalError("The out_spec is not correctly maintained.") from e
-        return res
+        return user_flat_outputs
 
     def recompile(self) -> torch.fx.graph_module.PythonCode:
         """
@@ -234,8 +255,10 @@ def make_export_graph_module(
     graph: fx.Graph,
     in_spec: Optional[pytree.TreeSpec] = None,
     out_spec: Optional[pytree.TreeSpec] = None,
-    mutation: Optional[List[Tuple[str, List[str]]]] = None,
     example_inputs: Any = None,
+    mutation_data: Optional["MutationData"] = None,
+    params: Optional["OrderedDict[str, torch.nn.Parameter]"] = None,
+    buffers: Optional["OrderedDict[str, torch.Tensor]"] = None,
     class_name: str = "ExportGraphModule",
 ) -> fx.GraphModule:
 
@@ -256,26 +279,32 @@ def make_export_graph_module(
 
     input_shape_constraints_by_src_name: Dict[str, List[Tuple[int, ConstraintExpr, ConstraintExpr]]] = {}
     input_name_to_example_inputs: Dict[str, Any] = {}
+    num_params_buffers = len(mutation_data.parameters) + len(mutation_data.buffers) if mutation_data is not None else 0
     if example_inputs is not None:
         input_tracker = 0
         for node in gm.graph.nodes:
             if node.op == "placeholder":
-                example_input = example_inputs[input_tracker]
-                if id(example_input) in input_shape_constraints_by_tensor_id:
-                    input_shape_constraints_by_src_name[node.name] = input_shape_constraints_by_tensor_id[id(example_input)]
-                input_name_to_example_inputs[node.name] = example_input
+                if input_tracker >= num_params_buffers:
+                    example_input = example_inputs[input_tracker - num_params_buffers]
+                    if id(example_input) in input_shape_constraints_by_tensor_id:
+                        input_shape_constraints_by_src_name[node.name] = input_shape_constraints_by_tensor_id[id(example_input)]
+                    input_name_to_example_inputs[node.name] = example_input
                 input_tracker += 1
 
     meta = ExportMetadata(
         in_spec=in_spec,
         out_spec=out_spec,
         update_spec=0,
-        mutation=mutation if mutation else [],
         input_shape_constraints=input_shape_constraints_by_src_name,
         inline_constraints=inline_constraints,
         input_name_to_example_inputs=input_name_to_example_inputs,
+        mutation_data=mutation_data,
     )
     attach_export_graph_metadata(gm, meta)
+    # TODO figure out where to save them
+
+    gm.parameters = params if params is not None else OrderedDict()
+    gm.buffers = buffers if buffers is not None else OrderedDict()
     return gm
 
 
