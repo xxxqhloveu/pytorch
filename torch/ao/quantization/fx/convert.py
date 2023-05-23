@@ -725,10 +725,13 @@ def convert_weighted_module(
         if weight_post_process is None:
             weight_post_process = qconfig.weight()  # type: ignore[union-attr, operator]
         # run weight observer
-        # TODO: This is currently a hack for QAT to get the right shapes for scale and zero point.
-        # In the future, we should require the user to calibrate the model after calling prepare
+        # TODO: This is currently a hack to get the right shapes for scale and zero point
+        # if the user didn't calibrate before calling convert. In the future, we should just
+        # remove this hack and require the user to always calibrate first. Here we require
+        # this for the decomposed case only but we should do the same for all cases.
         # Issue: https://github.com/pytorch/pytorch/issues/73941
-        weight_post_process(float_module.weight)  # type: ignore[operator]
+        if not is_decomposed:
+            weight_post_process(float_module.weight)  # type: ignore[operator]
         wq_or_wq_dict.update(get_qparam_dict(weight_post_process))
 
     # We use the same reference module for all modes of quantization: static, dynamic, weight_only
