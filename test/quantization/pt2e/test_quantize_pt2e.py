@@ -797,7 +797,7 @@ class TestQuantizePT2E(QuantizationTestCase):
         self.assertEqual(eps, 1e-5)
 
     # TODO: merge these numerics tests with the graph tests above
-    def test_prepare_qat_conv_bn_numerics(self):
+    def test_qat_conv_bn_numerics(self):
         class M(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -810,10 +810,14 @@ class TestQuantizePT2E(QuantizationTestCase):
                 return x
 
         example_inputs = (torch.randn(1, 3, 5, 5),)
-        self._verify_symmetric_qnnpack_qat_numerics(M(), example_inputs, is_per_channel=False)
-        self._verify_symmetric_qnnpack_qat_numerics(M(), example_inputs, is_per_channel=True)
+        self._verify_symmetric_qnnpack_qat_numerics(
+            M(), example_inputs, is_per_channel=False, verify_convert=True,
+        )
+        self._verify_symmetric_qnnpack_qat_numerics(
+            M(), example_inputs, is_per_channel=True, verify_convert=True,
+        )
 
-    def test_prepare_qat_conv_bn_relu_numerics(self):
+    def test_qat_conv_bn_relu_numerics(self):
         class M(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -828,8 +832,12 @@ class TestQuantizePT2E(QuantizationTestCase):
                 return x
 
         example_inputs = (torch.randn(1, 3, 5, 5),)
-        self._verify_symmetric_qnnpack_qat_numerics(M(), example_inputs, is_per_channel=False)
-        self._verify_symmetric_qnnpack_qat_numerics(M(), example_inputs, is_per_channel=True)
+        self._verify_symmetric_qnnpack_qat_numerics(
+            M(), example_inputs, is_per_channel=False, verify_convert=True,
+        )
+        self._verify_symmetric_qnnpack_qat_numerics(
+            M(), example_inputs, is_per_channel=True, verify_convert=True,
+        )
 
     def _verify_symmetric_qnnpack_qat_numerics(
         self,
@@ -878,28 +886,9 @@ class TestQuantizePT2E(QuantizationTestCase):
         if verify_convert:
             model_pt2e = convert_pt2e(model_pt2e)
             quant_result_pt2e = model_pt2e(*example_inputs)
-
             model_fx = _convert_to_reference_decomposed_fx(model_fx, backend_config=backend_config)
             quant_result_fx = model_fx(*example_inputs)
-            self.assertEqual(after_prepare_result_pt2e, after_prepare_result_fx)
-
-
-    def test_convert_qat_conv_bn_numerics(self):
-        class M(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.conv = torch.nn.Conv2d(3, 3, 3)
-                self.bn = torch.nn.BatchNorm2d(3)
-
-            def forward(self, x):
-                x = self.conv(x)
-                x = self.bn(x)
-                return x
-
-        example_inputs = (torch.randn(1, 3, 5, 5),)
-        self._verify_symmetric_qnnpack_qat_numerics(M(), example_inputs, is_per_channel=False)
-        # TODO: enable in a separate PR
-        # self._verify_symmetric_qnnpack_qat_numerics(M(), example_inputs, is_per_channel=True)
+            self.assertEqual(quant_result_pt2e, quant_result_fx)
 
 class TestQuantizePT2EModels(QuantizationTestCase):
     @skip_if_no_torchvision
