@@ -50,6 +50,7 @@ from .virtualized import ops, V
 
 log = logging.getLogger(__name__)
 lowerings = {}
+nested_lowerings = {}
 layout_constraints = {}
 fallbacks = set()
 aten = torch.ops.aten
@@ -157,7 +158,7 @@ def get_promoted_dtype(*args, type_promotion_kind: ELEMENTWISE_TYPE_PROMOTION_KI
 
 
 def _register_lowering(
-    aten_fn, decomp_fn, broadcast, type_promotion_kind, convert_input_to_bool
+    aten_fn, decomp_fn, broadcast, type_promotion_kind, convert_input_to_bool, lowerings_dict=None
 ):
     """
     Add a lowering to lowerings dict
@@ -241,7 +242,9 @@ def _register_lowering(
                 if other_fn not in lowerings:
                     aten_fn.append(other_fn)
 
-    lowerings.update({fn: wrapped for fn in aten_fn})
+    if lowerings_dict is None:
+        lowerings_dict = lowerings
+    lowerings_dict.update({fn: wrapped for fn in aten_fn})
     return wrapped
 
 
@@ -250,6 +253,7 @@ def register_lowering(
     broadcast=False,
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
     convert_input_to_bool=False,
+    lowerings_dict=None,
 ):
     """
     Shim to support decorator syntax.
@@ -260,6 +264,7 @@ def register_lowering(
         broadcast=broadcast,
         type_promotion_kind=type_promotion_kind,
         convert_input_to_bool=convert_input_to_bool,
+        lowerings_dict=lowerings_dict,
     )
 
 
@@ -340,6 +345,19 @@ def make_pointwise(
         dtype = override_return_dtype or inputs[0].get_dtype()
         is_cuda = decode_device(inputs[0].get_device()).type == "cuda"
 
+        # TODO: Fix this
+        try:
+            obj = inputs[0].data.data
+            if hasattr(obj, "layout"):
+                full_nested_size = obj.layout.full_nested_size
+                jagged_offsets_src = obj.layout.jagged_offsets_src
+            else:
+                full_nested_size = obj.full_nested_size
+                jagged_offsets_src = obj.jagged_offsets_src
+        except AttributeError:
+            full_nested_size = None
+            jagged_offsets_src = None
+
         for other in inputs[1:]:
             assert isinstance(other, ir.BaseConstant) or len(ranges) == len(
                 other.get_size()
@@ -370,6 +388,8 @@ def make_pointwise(
             dtype=dtype,
             inner_fn=inner_fn,
             ranges=ranges,
+            full_nested_size=full_nested_size,
+            jagged_offsets_src=jagged_offsets_src,
         )
 
     return inner
@@ -1038,6 +1058,7 @@ def fallback_handler(kernel, add_to_fallback_set=True):
         fallbacks.add(kernel)
 
     def handler(*args, **kwargs):
+        # TODO: Maybe need jagged here too
         return pytree.tree_map(
             TensorBox.create, ir.FallbackKernel.create(kernel, *args, **kwargs)
         )
@@ -1102,7 +1123,7 @@ def fallback_node_due_to_unsupported_type(node: torch.fx.Node, allow_cpu_inputs=
     return check_skip_condition(node, is_output=True)
 
 
-def make_fallback(kernel, layout_constraint=None, warn=True):
+def make_fallback(kernel, layout_constraint=None, warn=True, lowerings_dict=None):
     assert (
         kernel not in decompositions
     ), f"both a fallback and a decomp for same kernel: {kernel}"
@@ -1127,7 +1148,9 @@ def make_fallback(kernel, layout_constraint=None, warn=True):
     add_needs_realized_inputs(kernel)
     if layout_constraint is not None:
         add_layout_constraint(kernel, layout_constraint)
-    return register_lowering(kernel, type_promotion_kind=None)(fallback_handler(kernel))
+    return register_lowering(
+        kernel, type_promotion_kind=None, lowerings_dict=lowerings_dict
+    )(fallback_handler(kernel))
 
 
 def philox_rand_offset(shape):
