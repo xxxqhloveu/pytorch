@@ -2205,7 +2205,7 @@ def parse_args(args=None):
         "--tolerance",
         action="store_true",
         help="extracts the tolerance for each model with small batch size and eval mode",
-
+    )
     run_mode_group = parser.add_mutually_exclusive_group(required=True)
     run_mode_group.add_argument(
         "--training",
