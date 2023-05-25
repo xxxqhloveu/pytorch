@@ -1211,6 +1211,7 @@ aten_native_source_non_codegen_list = [
     "aten/src/ATen/native/quantized/cpu/UpSampleNearest3d.cpp",
     "aten/src/ATen/native/quantized/cpu/TensorOperators.cpp",
     "aten/src/ATen/native/quantized/Copy.cpp",
+    "aten/src/ATen/native/quantized/ConvUtils.cpp",
     "aten/src/ATen/native/quantized/QTensor.cpp",
     "aten/src/ATen/native/quantized/TensorCompare.cpp",
     "aten/src/ATen/native/quantized/TensorFactories.cpp",
