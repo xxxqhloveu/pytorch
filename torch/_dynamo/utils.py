@@ -1578,9 +1578,43 @@ def to_numpy_helper(___tmp_0):
     def convert(obj):
         if isinstance(obj, torch_np.ndarray):
             return obj.tensor.numpy()
+        elif isinstance(obj, torch.Tensor):
+            return obj.numpy()
         else:
             return obj
 
     if isinstance(___tmp_0, tuple):
         return tuple([convert(obj) for obj in ___tmp_0])
     return convert(___tmp_0)
+
+
+def to_tensor(value):
+    """Convert torch_np.ndarray to tensor, leave other types intact. If a list/tuple, loop through it to convert."""
+    if isinstance(value, torch_np.ndarray):
+        return value.tensor
+    elif isinstance(value, (tuple, list)):
+        return type(value)(to_tensor(obj) for obj in value)
+    else:
+        return value
+
+
+class to_tensor_wrapper:
+    def __init__(self, f):
+        self.f = f
+        self.__name__ = "wrapped_" + self.f.__name__
+
+    def __repr__(self):
+        return f"<Wrapped function <original {self.f.__name__}>>"
+
+    def __call__(self, *args, **kwargs):
+        out = self.f(*args, **kwargs)
+        return to_tensor(out)
+
+
+def attr_wrapper(obj, name):
+    if isinstance(obj, torch_np.ndarray):
+        out = getattr(obj, name)
+        return to_tensor(out)
+    elif isinstance(obj, torch.Tensor):
+        out = getattr(torch_np.ndarray(obj), name)
+        return to_tensor(out)

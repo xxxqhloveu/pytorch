@@ -10,8 +10,7 @@ import torch.fx
 import torch.random
 from torch.fx.experimental.symbolic_shapes import guard_scalar, SymTypes
 
-from .. import config, utils, variables
-from ..bytecode_transformation import create_call_function, Instruction
+from .. import config, variables
 
 from ..exc import unimplemented
 from ..guards import GuardBuilder
@@ -366,8 +365,6 @@ class TensorVariable(VariableTracker):
                     f"Tensor.{name}. Turn on config.numpy_ndarray_as_tensor and install torch_np to support "
                     f"tensor.numpy(). "
                 )
-            from torch_np import ndarray
-
             from .builder import wrap_fx_proxy_cls
 
             assert not args, "Tensor.numpy() doesn't take args."
@@ -379,7 +376,7 @@ class TensorVariable(VariableTracker):
                 tx=tx,
                 proxy=tx.output.create_proxy(
                     "call_function",
-                    ndarray,
+                    torch.detach,
                     *proxy_args_kwargs([self], {}),
                 ),
                 example_value=None,
@@ -681,6 +678,8 @@ class NumpyNdarrayVariable(VariableTracker):
         class_type=torch.Tensor,
         **kwargs,
     ):
+        if "specialized_value" in kwargs:
+            kwargs.pop("specialized_value")
         super().__init__(**kwargs)
         self.proxy = proxy
         self.class_type = class_type
@@ -691,14 +690,19 @@ class NumpyNdarrayVariable(VariableTracker):
     def as_proxy(self):
         return self.proxy
 
-    def reconstruct(self, codegen):
-        unimplemented("reconstruct needs to be implemented")
+    @staticmethod
+    def specialize(value: torch.Tensor):
+        props = {
+            "class_type": type(value),
+        }
+        return props
 
     def unpack_var_sequence(self, tx):
         super().unpack_var_sequence(tx)
 
     def var_getattr(self, tx, name):
-        from torch._dynamo.variables import GetAttrVariable
+        from torch._dynamo.variables import GetAttrVariable, TupleVariable
+        from ..utils import attr_wrapper
         from .builder import wrap_fx_proxy_cls
 
         result = None
@@ -707,15 +711,54 @@ class NumpyNdarrayVariable(VariableTracker):
             result = wrap_fx_proxy_cls(
                 target_cls=NumpyNdarrayVariable,
                 tx=tx,
-                proxy=GetAttrVariable.create_getattr_proxy(self.as_proxy(), name),
+                proxy=tx.output.create_proxy(
+                    "call_function",
+                    attr_wrapper,
+                    (self.as_proxy(), name),
+                    {},
+                ),
                 example_value=None,
                 **options,
             )
-        elif name in ["size", "itemsize", "strides", "shape", "ndim"]:
+        elif name in ["ndim", "itemsize", "shape"]:
             result = wrap_fx_proxy_cls(
                 target_cls=ConstantVariable,
                 tx=tx,
                 proxy=GetAttrVariable.create_getattr_proxy(self.as_proxy(), name),
+                example_value=None,
+                **options,
+            )
+        elif name == "shape":
+            result = wrap_fx_proxy_cls(
+                target_cls=TupleVariable,
+                tx=tx,
+                proxy=GetAttrVariable.create_getattr_proxy(self.as_proxy(), name),
+                example_value=None,
+                **options,
+            )
+        elif name == "size":
+            result = wrap_fx_proxy_cls(
+                target_cls=ConstantVariable,
+                tx=tx,
+                proxy=tx.output.create_proxy(
+                    "call_method",
+                    "numel",
+                    (self.as_proxy(),),
+                    {},
+                ),
+                example_value=None,
+                **options,
+            )
+        elif name == "strides":
+            result = wrap_fx_proxy_cls(
+                target_cls=ConstantVariable,
+                tx=tx,
+                proxy=tx.output.create_proxy(
+                    "call_function",
+                    attr_wrapper,
+                    (self.as_proxy(), name),
+                    {},
+                ),
                 example_value=None,
                 **options,
             )
@@ -733,32 +776,6 @@ class NumpyNdarrayVariable(VariableTracker):
         kwargs: "Dict[str, VariableTracker]",
     ) -> "VariableTracker":
         unimplemented(f"numpy_ndarray.{name}()")
-
-    @staticmethod
-    def reconstruct_ndarray_before_return(codegen, output_graph) -> List[Instruction]:
-        """
-        Check if return value is torch_np.ndarray if so convert it to numpy.ndarray.
-        The equivalent Python code looks like this:
-        def f(x):
-            ___tmp_0 = __compiled_fn_0(x)
-            if isinstance(___tmp_0, torch_np.ndarray):
-                return ___tmp_0.tensor.numpy()
-            else:
-                return ___tmp_0
-        """
-        if not config.numpy_ndarray_as_tensor:
-            return []
-
-        var = output_graph.new_var()
-
-        return [
-            codegen.create_store(var),
-            *AttrSource(
-                codegen.tx.import_source(utils.__name__), "to_numpy_helper"
-            ).reconstruct(codegen),
-            codegen.create_load(var),
-            *create_call_function(1, False),
-        ]
 
 
 class UnspecializedPythonVariable(TensorVariable):
