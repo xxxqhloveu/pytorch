@@ -11,7 +11,7 @@
 #include <ATen/native/TensorIterator.h>
 #include <ATen/native/cpu/Loops.h>
 #include <ATen/cpu/vec/functional.h>
-
+// #include <iostream>
 namespace at::native {
 
 namespace {
@@ -105,6 +105,7 @@ void _amp_foreach_non_finite_check_and_unscale_cpu_kernel(
           at::native::cpu_kernel_vec(
               iter,
               [found_inf_ptr, inv_scale_ptr](scalar_t val_in) -> scalar_t {
+                std::cout << "val " << val_in << "\n";
                 if (!std::isfinite(val_in)) {
                   *found_inf_ptr = 1.f;
                 }
@@ -117,6 +118,7 @@ void _amp_foreach_non_finite_check_and_unscale_cpu_kernel(
                 if (val_vec.has_infinite()) {
                   *found_inf_ptr = 1.f;
                 }
+                std::cout << "val_vec " << val_vec << "\n";
                 // Every thread accesses inv_scale, but it will hit in cache.
                 const auto inv_scale_val = *inv_scale_ptr;
                 return inv_scale_val == 1.f ? val_vec : val_vec * Vectorized<scalar_t>(inv_scale_val);
@@ -181,7 +183,11 @@ at::Tensor& _amp_update_scale_cpu_kernel(
     // so growth_tracker is incremented before comparing to growth_interval.
     auto successful = (*growth_tracker_ptr) + 1;
     if (successful == growth_interval) {
-      *current_scale_ptr = (*current_scale_ptr) * growth_factor;
+      auto new_scale = static_cast<float>((*current_scale_ptr) * growth_factor);
+      // Do not grow the scale past fp32 bounds to inf.
+      if (std::isfinite(new_scale)) {
+        *current_scale_ptr = new_scale;
+      }
       *growth_tracker_ptr = 0;
     } else {
       *growth_tracker_ptr = successful;
