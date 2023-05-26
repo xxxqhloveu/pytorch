@@ -1483,6 +1483,7 @@ def aot_dispatch_base_graph(flat_fn, flat_args: List[Tensor], aot_config: AOTCon
     # While cases that it does need to handle include:
     # - input mutations (including when inputs are aliases of each other)
     # - input metadata mutations
+
     keep_mutations = aot_config.keep_inference_input_mutations
     fn_to_trace = fn_input_mutations_to_outputs(
         flat_fn,
@@ -1527,9 +1528,8 @@ def aot_dispatch_base(flat_fn, flat_args: List[Tensor], aot_config: AOTConfig, *
             # Add the seed and offset as example inputs to pass to the compiler
             fake_mode = detect_fake_mode()
             seed, offset = CUDARngStateHelper.get_torch_state_as_tuple(fake_mode)
-            adjusted_flat_args = [seed, offset, *flat_args]
-            flat_args.clear()  # Don't hold extra reference
-        compiled_fw = compiler(fw_module, adjusted_flat_args)
+            flat_args.extend([seed, offset])
+        compiled_fw = compiler(fw_module, flat_args)
 
     # This boxed_call handling happens inside create_runtime_wrapper as well.
     # However, create_runtime_wrapper does not expect the rng offsets in the
@@ -2777,7 +2777,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
                 # Update example inputs for the fw_compiler
                 fake_mode = detect_fake_mode()
                 seed, offset = CUDARngStateHelper.get_torch_state_as_tuple(fake_mode)
-                adjusted_flat_args = [seed, offset, *flat_args]
+                adjusted_flat_args.extend([seed, offset])
                 # We are not clearing flat_args here because
                 # 1) There is a check in the the debug compiler at the end
                 # 2) It does not matter as these are fake tensors
@@ -2800,7 +2800,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
             if CompiledFunction.metadata.is_rng_op_functionalized:
                 # Add the seed and offset to args
                 seed, offset = CUDARngStateHelper.get_torch_state_as_tuple()
-                args = (seed, offset, *args)
+                args = (*args, seed, offset)
             # There is a pretty complicated calling convention around what the compiled fw returns.
             # The full list of outputs and their relative order is:
             # (*mutated_inputs, *fw_outs, *fw_intermediate_bases, *saved_tensors, *saved_symints)
@@ -2988,7 +2988,7 @@ def aot_dispatch_autograd(flat_fn, flat_args: List[Any], aot_config: AOTConfig, 
                 rng_args = CUDARngStateHelper.get_torch_state_as_tuple()
 
             all_args = (
-                list(rng_args) + list(ctx.symints) + list(ctx.saved_tensors) + list(contiguous_args)
+                list(ctx.symints) + list(ctx.saved_tensors) + list(contiguous_args) + list(rng_args)
             )
 
             del contiguous_args
